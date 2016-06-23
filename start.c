@@ -6,8 +6,9 @@
 #include <time.h>
 #include <stdlib.h>
 #include <ev.h>
-#include "logger.h"
 #include <sys/tree.h>
+#include "stat_server.h"
+#include "logger.h"
 
 
 #define SERVER "server"
@@ -15,12 +16,15 @@
 #define DATE   "DATE"
 #define MAX_GROUP_ID 1000
 #define MAX_NODES_PER_PROXY 100
+#define BUF_SIZE        4096
 
 
-static ev_timer timeout_watcher;
+static char buffer[BUF_SIZE];
+struct ev_periodic survey_periodic;
 static int surv_sock;
 static int pub_sock;
 static int groups[MAX_NODES_PER_PROXY]; 
+static int msg_count = 0;
 
 
 
@@ -59,11 +63,11 @@ void survey_request(EV_P_ ev_timer *w, int revents) {
     struct nn_pollfd pfd[1] = {{.fd = surv_sock, .events = NN_POLLIN}};
     int rc = nn_poll(pfd, 1, 2000);
     if (rc == 0) {
-      logger("HB timeout from connected statsd nodes.");
+      logger("ERROR", "HB timeout from connected statsd nodes.");
       break;
     }
     if (rc == -1) {
-      logger("Error can't recive HB messages at moment.");
+      logger("ERROR", "Error can't recive HB messages at moment.");
       break;
     }
     if (pfd [0].revents & NN_POLLIN) {
@@ -77,7 +81,6 @@ void survey_request(EV_P_ ev_timer *w, int revents) {
       if (bytes == ETIMEDOUT) break;
       if (bytes >= 0)
       {
-        printf ("SERVER: RECEIVED \"%s\" SURVEY RESPONSE\n", buf);
         group_id = strtol(buf, &error,  10);
         if(!error) {
           char *error_msg; 
@@ -112,16 +115,26 @@ void survey_request(EV_P_ ev_timer *w, int revents) {
     }
     pre = recv_group[x];
   }
-  ev_timer_again(EV_A_ w);
+  printf("\nMsg counter %d\n", msg_count);
+}
+void msg_rcv(EV_P_ ev_io *w, int revents)
+{
+  struct sock_ev_serv *serv = (struct sock_ev_serv *) w;
+  socklen_t addr_len = sizeof(serv->addr);
+	socklen_t bytes = recvfrom(serv->fd, buffer, sizeof(buffer) - 1, 0, (struct sockaddr*) &serv->addr, (socklen_t *) &addr_len);
+  buffer[bytes] = '\0';
+  msg_count++;
 }
 int main (const int argc, const char **argv)
 {
+  struct sock_ev_serv server;
   struct ev_loop *loop = EV_DEFAULT;
   initlize_sock(&surv_sock, "tcp://127.0.0.1:9999");
   initlize_sock(&pub_sock,  "tcp://127.0.0.1:8888");
-	ev_init(&timeout_watcher, survey_request);
-	timeout_watcher.repeat = 10;
-	ev_timer_again(loop, &timeout_watcher);
+  server_init(&server, 3561);
+  add_ev_loop(&server, loop, msg_rcv);
+  ev_periodic_init(&survey_periodic, survey_request, 0, 60, 0);
+  ev_periodic_start(EV_A_ &survey_periodic);
   ev_run(loop, 0);
   nn_shutdown (surv_sock, 0);
 	return 0;
