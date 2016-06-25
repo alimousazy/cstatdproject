@@ -22,6 +22,16 @@ int array_push(array* arr, void* data) {
   return arr->index - 1;
 }
 
+int array_pop(array* arr, void* data) {
+  arr->index -= 1;
+  if (arr->index < 0) {
+    return -1;
+  }
+  return arr->index;
+}
+
+
+
 int array_grow(array* arr, int size) {
   if (size <= arr->length) {
     return -1;
