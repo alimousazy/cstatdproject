@@ -16,7 +16,7 @@
 
 #define SERVER "server"
 #define CLIENT "client"
-#define DATE   "DATE"
+#define GREQUEST   "GROUP_REQUEST"
 #define MAX_GROUP_ID 1000
 #define MAX_NODES_PER_PROXY 100
 #define BUF_SIZE        4096
@@ -31,6 +31,7 @@ static int pub_sock;
 static int groups[MAX_NODES_PER_PROXY]; 
 static int groups_count = 0; 
 static int msg_count = 0;
+static int dcounter = 0;
 
 struct statd_msg {
   char *c;
@@ -70,15 +71,12 @@ static int initlize_sock(int *sock, char *url, int type)
   }
 }
 void survey_request(EV_P_ ev_timer *w, int revents) {
-  printf("MSG count %d\n", msg_count);
-  char *group_request = "GROUP_REQUEST";
-  int sz_d = strlen(group_request) + 1; // '\0' too
-  int bytes = nn_send (surv_sock, DATE, sz_d, 0);
-  int trail = 0;
-  int counter = 0;
-  int recv_group[MAX_NODES_PER_PROXY];
-  memset(recv_group, 0, sizeof(recv_group[0]) * MAX_NODES_PER_PROXY);
-
+  printf("MSG count %d\n", dcounter);
+  int sz_d = strlen(GREQUEST) + 1; 
+  int bytes = nn_send (surv_sock, GREQUEST, sz_d, 0);
+  groups_count = 0;
+  hash_ring_free(ring);
+  ring = hash_ring_create(100, HASH_FUNCTION_SHA1);
   if(bytes != sz_d){
     logger("WARN", "Group request partially sent");
   }
@@ -105,56 +103,13 @@ void survey_request(EV_P_ ev_timer *w, int revents) {
       if (bytes == ETIMEDOUT) break;
       if (bytes >= 0)
       {
-        group_id = strtol(buf, &error,  10);
-        if(!error) {
-          char *error_msg; 
-          asprintf(&error_msg, "%s msg(%s)", "Group ID should be an integer", buf);
-          logger("ERROR", error_msg);
-          free(error_msg);
+        if((hash_ring_add_node(ring, (uint8_t*)buf, bytes)) != HASH_RING_OK) {
+         logger("Error", "Can't add to hash ring");
+        } else {
+          groups_count++;
         }
-        else if (group_id > MAX_GROUP_ID) {
-          char *error_msg; 
-          asprintf(&error_msg, "%s More than %d recived %d", "Group ID should be an integer", MAX_GROUP_ID, group_id);
-          logger("ERROR", error_msg);
-          free(error_msg);
-        }
-        else {
-          if ( counter < MAX_NODES_PER_PROXY)
-          {
-            recv_group[counter++] = group_id;
-          }
-        }
-        nn_freemsg (buf);
       }
-    }
-  }
-  recv_group[counter] = 0;
-  qsort(recv_group, MAX_NODES_PER_PROXY, sizeof(recv_group[0]), compare_int);
-  int pre = 0;
-  for(int x = 0, l = 0; recv_group[x] != 0; x++)
-  {
-    if(pre != recv_group[x])
-    {
-      groups[l++] = recv_group[x];
-    }
-    pre = recv_group[x];
-  }
-  if(ring != NULL)
-    hash_ring_free(ring);
-  ring = hash_ring_create(100, HASH_FUNCTION_SHA1);
-  groups_count = 0;
-  for(int x = 0; groups[x] != 0; x++)
-  {
-    char *group_id;
-    if(asprintf(&group_id, "%d", x) != -1) {
-      if((hash_ring_add_node(ring, (uint8_t*)group_id, strlen(group_id))) != HASH_RING_OK) {
-        logger("Error", "Can't add to hash ring");
-      } else {
-        groups_count++;
-      }
-      free(group_id);
-    } else {
-      logger("Error", "Out of memory, Can't allocate group id string");
+      nn_freemsg (buf);
     }
   }
 }
@@ -169,15 +124,23 @@ void push_cb(EV_P_ ev_io *w, int revents)
     return;
   }
   hash_ring_node_t *node;
-  node = hash_ring_find_node(ring, (uint8_t*) np->c, strlen(np->c));
+  char *spe = strstr(np->c, ":");
+  size_t len;  
+  if(spe) {
+    len = spe - np->c; 
+  } else {
+    len = strlen(np->c);
+  }
+  node = hash_ring_find_node(ring, (uint8_t*) np->c, len);
   if(node == NULL)
   {
     logger("ERROR", "Can't process messsage");
     return;
   }
   struct sock_ev_nanomsg *s = (struct sock_ev_nanomsg *) w; 
-  void *msg = nn_allocmsg(strlen(np->c) + node->nameLen + 1, 0);
-  sprintf(msg, "%s.%s", node->name, np->c);
+  int metric_len = strlen(np->c) + node->nameLen + 2;
+  void *msg = nn_allocmsg(metric_len, 0);
+  snprintf(msg, metric_len, "%s>%s", node->name, np->c);
   int bytes = nn_send(s->nn_fd, &msg, NN_MSG, NN_DONTWAIT);
   if(bytes == -1) {
     logger("ERROR", "FAiled to send message\n");
@@ -204,6 +167,7 @@ void msg_rcv(EV_P_ ev_io *w, int revents)
   }
   entry->c = strdup(buffer);
   TAILQ_INSERT_TAIL(&msg_list, entry, entries);
+  dcounter++;
   msg_count++;
 }
 void check_metric_array(struct ev_loop* loop, struct ev_check* instance, int revents)
@@ -227,8 +191,8 @@ int main (const int argc, const char **argv)
   struct sock_ev_nanomsg sevnano;
   static ev_idle idle_watcher;
   TAILQ_INIT(&msg_list); 
-  initlize_sock(&surv_sock, "tcp://127.0.0.1:9999", NN_SURVEYOR);
-  initlize_sock(&pub_sock,  "tcp://127.0.0.1:8888", NN_PUB);
+  initlize_sock(&surv_sock, "tcp://0.0.0.0:9999", NN_SURVEYOR);
+  initlize_sock(&pub_sock,  "tcp://0.0.0.0:8888", NN_PUB);
   server_init(&server, 3561);
   sleep(10);
 
